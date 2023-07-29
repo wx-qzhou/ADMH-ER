@@ -11,6 +11,6 @@ git init
 git add .
 git commit -m .
 git remote add origin $3
-git push -u origin main
+git push -u origin master
 
 read -r -p "Exit ？？[Y/n] " input
