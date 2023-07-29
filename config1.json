@@ -1,0 +1,32 @@
+{
+    "datasets_name" : "DB_FB_YAGO_dataset_V3",
+    "gpu_id" : 0,
+    "seed" : 0,
+    "dataset_division" : "811",
+    "ordered" : 1,
+    "dim" : 200,
+    "hidden_dim" : 100,
+    "i_dim" : 768,
+    "a_dim": 768,
+    "t_dim": 768,
+    "use_cuda" : true,
+    "dropout" : 0.5, 
+    "attn_dropout" : 0.0, 
+    "class_dropout" : 0.5,
+    "batch_threads_num" : 2,
+    "batch_size" : 788,
+    "max_epoch" : 100,
+    "neg_triples_num" : 1,
+    "learning_rate" : 0.001,
+    "margin" : 2,
+    "start_valid": 0,
+	"eval_freq": 1,
+    "early_stop": 0,
+    "top_k": [
+		1, 3, 5, 10
+	], 
+    "test_threads_num" : 4,
+    "eval_metric" : "inner", 
+    "eval_norm" : true,
+    "stop_metric": "mrr"
+}
