@@ -37,8 +37,7 @@ class SpecialSpmm(nn.Module):
 
 class MultiHeadGraphAttention(nn.Module):
     """
-    Sparse version GAT layer, similar to https://arxiv.org/abs/1710.10903
-    https://github.com/Diego999/pyGAT/blob/master/layers.py
+    Sparse version GAT layer
     """
 
     def __init__(self, n_head, f_in, f_out, attn_dropout, diag=True, init=None, bias=False):
@@ -108,8 +107,7 @@ class MultiHeadGraphAttention(nn.Module):
 
 class GraphConvolution(nn.Module):
     """
-    Simple GCN layer, similar to https://arxiv.org/abs/1609.02907
-    https://github.com/tkipf/pygcn
+    Simple GCN layer
     """
 
     def __init__(self, in_features, out_features, bias=True):
@@ -237,7 +235,6 @@ class OffsetScale(nn.Module):
         return out.unbind(dim=-2)
 
 class GAU(nn.Module):
-    "https://github.com/lucidrains/FLASH-pytorch/blob/main/flash_pytorch/flash_pytorch.py#L121"
     def __init__(self, dim, query_key_dim=200, expansion_factor=1, add_residual=True, dropout=0., laplace_attn_fn=False):
         super().__init__()
         self.dim = dim
@@ -321,7 +318,6 @@ class MultiModalFusion(nn.Module):
         return joint_emb
 
 class Multi_Modal_Aggregator(nn.Module):
-    "This is a class of multi-modal fusion. citing https://arxiv.org/pdf/2209.01416.pdf"
     def __init__(self, in_features, out_features, modal_num=3, bias=False):
         super(Multi_Modal_Aggregator, self).__init__()
         self.in_features = in_features
@@ -356,7 +352,6 @@ class Multi_Modal_Aggregator(nn.Module):
             return output
 
 class TransE(nn.Module):
-    "https://proceedings.neurips.cc/paper/2013/file/1cecc7a77928ca8133fa24680a88d2f9-Paper.pdf"
     def __init__(self, margin, norm=1, reduction='mean') -> None:
         super(TransE, self).__init__()
         self.margin = margin
@@ -401,8 +396,6 @@ class RGCN_Atten(nn.Module):
         return output
 
 class Classifier(nn.Module):
-    """https://github.com/wx-qzhou/MFAND/blob/main/model/gnn_models.py"""
-
     def __init__(self, n_input, hidden_1, hidden_2, dropout=0.5, n_classes=1):
         super(Classifier, self).__init__()
         self.dropout = dropout
