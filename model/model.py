@@ -1,9 +1,10 @@
+import gc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from .Layers import Multi_Modal_Aggregator, TransE, RGCN_Atten, MultiModalFusion, Classifier, GAT, GCN
-from .Loss import IALLoss, ICLLoss
+from .Loss import InfoNCE
 
 class MSDIS(nn.Module):
     """
@@ -26,15 +27,15 @@ class MSDIS(nn.Module):
         self.rel_index, self.ent_index, self.emask, self.rmask = kg.entid_rel_list, kg.entid_ent_list, kg.e_mask, kg.r_mask
         nn.init.xavier_normal_(self.ent_embed.weight.data)
         nn.init.xavier_normal_(self.rel_embed.weight.data)
-        self.transE_forward = TransE(self.args.margin)
+        # self.transE_forward = TransE(self.args.margin)
 
         'Gat'
-        self.hidden_units = "200,200,200"
-        self.heads = "1,1,1"
+        self.hidden_units = self.args.hidden_units
+        self.heads = self.args.heads
         self.dropout = self.args.dropout
         self.attn_dropout = self.args.attn_dropout
-        self.instance_normalization = False
-        self.structure_encoder = "gat"
+        self.instance_normalization = self.args.instance_normalization
+        self.structure_encoder = self.args.structure_encoder
 
         self.n_units = [int(x) for x in self.hidden_units.strip().split(",")]
         self.n_heads = [int(x) for x in self.heads.strip().split(",")]
@@ -85,13 +86,13 @@ class MSDIS(nn.Module):
         nn.init.xavier_normal_(self.fc_t.weight.data)
 
         'multimodal fusion'
-        self.MMA = Multi_Modal_Aggregator(self.args.dim, self.args.dim, self.modality_num-1)
+        self.MMA = Multi_Modal_Aggregator(self.args.dim, self.args.hidden_dim, self.args.dim, self.modality_num-2)
         self.modal_fusion = MultiModalFusion(self.modality_num - 1)
         self.modal_fusion2 = MultiModalFusion(3)
-        self.contrastiveLoss = ICLLoss()
+        self.info_nce = InfoNCE(temperature=self.args.tau, reduction=self.args.reduction)
 
         'classification'
-        self.classifier = Classifier(2 * (self.modality_num + 1) * self.args.dim + self.modality_num + 1, 2 * self.args.dim, self.args.dim, dropout=self.args.class_dropout, n_classes=2)
+        self.classifier = Classifier(2 * (self.modality_num * self.args.dim + 2 * self.args.hidden_dim) + self.modality_num + 1, 2 * self.args.dim, self.args.dim, dropout=self.args.class_dropout, n_classes=2)
 
     def e_rep(self, e):
         return F.normalize(self.fc_e(self.ent_embed(e)), 2, -1)
@@ -129,7 +130,7 @@ class MSDIS(nn.Module):
         edge_r = torch.mean(torch.stack([self.sum_weight[idx] * edge_r_list[idx] for idx in range(len(edge_r_list))], dim=1), dim=1)
 
         edge_er = torch.cat((edge_e, edge_r), dim=-1)  # (N, 2 * dim)
-        del edge_r, edge_e, emask, rmask, edge_r_list, edge_e_list
+        del edge_r, edge_e, emask, rmask, edge_r_list, edge_e_list, e
         return edge_er
 
     def similarity_score(self, embed1, embed2, metric='cosine'):
@@ -145,18 +146,51 @@ class MSDIS(nn.Module):
                 score = F.softmax(torch.bmm(embed2, embed1).squeeze(-1), dim=-1)
             else:
                 score = F.softmax(torch.mm(embed1, embed2.T).squeeze(-1), dim=-1) 
+        del embed1, embed2
         return score
 
-    def contrastive_Learning(self, all_e):
-        hidden_e, hidden_i, hidden_a, hidden_t = self.obtain_embeddings(all_e) # (N1, dim)  
+    def embeddings_based_index_(self, hidden_e, e, p, n, N, M):
+        e_r_embed = torch.index_select(hidden_e, 0, e)   
+        p_r_embed = torch.index_select(hidden_e, 0, p)
+        n_r_embed = torch.index_select(hidden_e, 0, n)
 
-        score_r = self.contrastiveLoss(self.fc_all(hidden_e), hidden_e)
-        score_i = self.contrastiveLoss(self.fc_all(hidden_i), hidden_i)
-        score_t = self.contrastiveLoss(self.fc_all(hidden_t), hidden_t)
+        e_r_embed = e_r_embed.reshape(N, -1)
+        p_r_embed = p_r_embed.reshape(N, -1)
+        n_r_embed = n_r_embed.reshape(N, M-1, -1)
+        del hidden_e, e, p, n, N, M
+        return e_r_embed, p_r_embed, n_r_embed
 
-        del hidden_e, hidden_i, hidden_a, hidden_t
-        del all_e
-        return score_r, score_i, score_t
+    def contrastive_Learning(self, e, pn, all_e, sparse_adj):
+        # e : (N,), pn : (N, M)
+        N, M = e.shape[0], pn.shape[1]
+
+        hidden_e, hidden_r, hidden_i, hidden_a, hidden_t = self.obtain_embeddings(all_e, sparse_adj) # (N1, dim) 
+        hidden_all = self.multimodal(hidden_e, hidden_r, hidden_i, hidden_t, hidden_a)
+
+        p, n = pn[:,0], pn[:,1:].reshape(-1)
+
+        e_e_embed, p_e_embed, n_e_embed = self.embeddings_based_index_(hidden_e, e, p, n, N, M) # (N * M, dim) 
+        e_r_embed, p_r_embed, n_r_embed = self.embeddings_based_index_(hidden_r, e, p, n, N, M) # (N * M, dim) 
+        e_i_embed, p_i_embed, n_i_embed = self.embeddings_based_index_(hidden_i, e, p, n, N, M) # (N * M, dim) 
+        e_t_embed, p_t_embed, n_t_embed = self.embeddings_based_index_(hidden_t, e, p, n, N, M) # (N * M, dim)
+        e_a_embed, p_a_embed, n_a_embed = self.embeddings_based_index_(hidden_a, e, p, n, N, M) # (N * M, dim)
+        e_all_embed, p_all_embed, n_all_embed = self.embeddings_based_index_(hidden_all, e, p, n, N, M) # (N * M, dim)
+
+        loss_e = self.info_nce(e_e_embed, p_e_embed, n_e_embed)
+        loss_r = self.info_nce(e_r_embed, p_r_embed, n_r_embed)
+        loss_i = self.info_nce(e_i_embed, p_i_embed, n_i_embed)
+        loss_t = self.info_nce(e_t_embed, p_t_embed, n_t_embed)
+        loss_a = self.info_nce(e_a_embed, p_a_embed, n_a_embed)
+        loss_all = self.info_nce(e_all_embed, p_all_embed, n_all_embed)
+
+        
+        del e, pn, all_e, sparse_adj, p, n
+        del hidden_e, hidden_r, hidden_i, hidden_a, hidden_t, hidden_all
+        del e_e_embed, e_r_embed, e_i_embed, e_t_embed, e_a_embed, e_all_embed
+        del p_e_embed, p_r_embed, p_i_embed, p_t_embed, p_a_embed, p_all_embed
+        del n_e_embed, n_r_embed, n_i_embed, n_t_embed, n_a_embed, n_all_embed
+        gc.collect()
+        return [loss_e, loss_r, loss_i, loss_t, loss_a], loss_all * self.args.Lambda
 
     def multimodal(self, e_e_embed, e_r_embed, e_i_embed, e_t_embed, e_a_embed):
         
@@ -164,7 +198,7 @@ class MSDIS(nn.Module):
         output = self.MMA(e_e_embed, hidden_all) # (N1, dim)
         output = self.modal_fusion2([e_e_embed, hidden_all, output]) # (N1, 4 * dim)
 
-        del e_e_embed, e_r_embed, e_i_embed, e_t_embed, e_a_embed
+        del e_e_embed, e_r_embed, e_i_embed, e_t_embed, e_a_embed, hidden_all
         return output
 
     def obtain_embeddings(self, e, sparse_adj):
@@ -173,6 +207,7 @@ class MSDIS(nn.Module):
         hidden_i = self.i_rep(e) # (N, dim)
         hidden_a = self.a_rep(e) # (N, dim)
         hidden_t = self.t_rep(e) # (N, dim)
+        del e, sparse_adj
         return hidden_e, hidden_r, hidden_i, hidden_a, hidden_t
     
     def embeddings_based_index(self, hidden_e, e, pn, N, M):
@@ -181,19 +216,20 @@ class MSDIS(nn.Module):
 
         e_r_embed = e_r_embed.reshape(N, M, -1)
         pn_r_embed = pn_r_embed.reshape(N, M, -1)
+        del hidden_e, e, pn, N, M
         return e_r_embed, pn_r_embed
 
-    'TransE'
-    def forward_transe(self, r_p_h, r_p_r, r_p_t, r_n_h, r_n_r, r_n_t):
-        r_p_h = self.e_rep(r_p_h)
-        r_p_t = self.e_rep(r_p_t)
-        r_p_r = self.r_rep(r_p_r)
-        r_n_h = self.e_rep(r_n_h)
-        r_n_t = self.e_rep(r_n_t)
-        r_n_r = self.r_rep(r_n_r)
-        relation_loss = self.transE_forward(r_p_h, r_p_t, r_p_r, r_n_h, r_n_t, r_n_r)
-        del r_p_h, r_p_t, r_p_r, r_n_h, r_n_t, r_n_r
-        return relation_loss
+    # 'TransE'
+    # def forward_transe(self, r_p_h, r_p_r, r_p_t, r_n_h, r_n_r, r_n_t):
+    #     r_p_h = self.e_rep(r_p_h)
+    #     r_p_t = self.e_rep(r_p_t)
+    #     r_p_r = self.r_rep(r_p_r)
+    #     r_n_h = self.e_rep(r_n_h)
+    #     r_n_t = self.e_rep(r_n_t)
+    #     r_n_r = self.r_rep(r_n_r)
+    #     relation_loss = self.transE_forward(r_p_h, r_p_t, r_p_r, r_n_h, r_n_t, r_n_r)
+    #     del r_p_h, r_p_t, r_p_r, r_n_h, r_n_t, r_n_r
+    #     return relation_loss
 
     'Link'
     def forward_link(self, e, pn, all_e, sparse_adj):
@@ -203,7 +239,6 @@ class MSDIS(nn.Module):
         hidden_e, hidden_r, hidden_i, hidden_a, hidden_t = self.obtain_embeddings(all_e, sparse_adj) # (N1, dim)
 
         hidden_all = self.multimodal(hidden_e, hidden_r, hidden_i, hidden_t, hidden_a)
-
         # reset the shape of index
         e = e.unsqueeze(1).expand_as(pn).reshape(-1) # (N * M)  
         pn = pn.reshape(-1) # (N * M)  
@@ -221,12 +256,13 @@ class MSDIS(nn.Module):
         a_score = self.similarity_score(e_a_embed, pn_a_embed) # (N, M)
         t_score = self.similarity_score(e_t_embed, pn_t_embed) # (N, M)
         
-        score = self.similarity_score(e_all_embed, pn_all_embed, "inner") # (N, M)
+        score = self.similarity_score(e_all_embed, pn_all_embed) # (N, M)
 
-        del e, pn, all_e
-        del hidden_e, hidden_r, hidden_i, hidden_a, hidden_t
-        del e_e_embed, e_r_embed, e_i_embed, e_t_embed, e_a_embed
-        del pn_e_embed, pn_r_embed, pn_i_embed, pn_t_embed, pn_a_embed
+        del e, pn, all_e, sparse_adj
+        del hidden_e, hidden_r, hidden_i, hidden_a, hidden_t, hidden_all
+        del e_e_embed, e_r_embed, e_i_embed, e_t_embed, e_a_embed, e_all_embed
+        del pn_e_embed, pn_r_embed, pn_i_embed, pn_t_embed, pn_a_embed, pn_all_embed
+        gc.collect()
 
         return [e_score, r_score, i_score, a_score, t_score, score]
 
@@ -245,13 +281,22 @@ class MSDIS(nn.Module):
         a_score = self.similarity_score(e_a_embed.repeat(1, N).view(N * N, -1), e_a_embed.repeat(N, 1)).reshape(N, N, 1)
         t_score = self.similarity_score(e_t_embed.repeat(1, N).view(N * N, -1), e_t_embed.repeat(N, 1)).reshape(N, N, 1)
         score = self.similarity_score(hidden_all, hidden_all, "inner").reshape(N, N, 1)
+        # sparse_adj = sparse_adj.to_dense().reshape(N, N, 1)
+
+        weight_norm = F.softmax(self.modal_fusion.weight, dim=0)
+        r_score = weight_norm[0] * r_score
+        i_score = weight_norm[1] * i_score
+        t_score = weight_norm[2] * t_score
+        a_score = weight_norm[3] * a_score
 
         z = torch.cat([adj, e_score, r_score, i_score, t_score, a_score, score], dim=-1)
         output = self.classifier(z)
 
+        del e, N, sparse_adj
         del e_e_embed, e_r_embed, e_i_embed, e_a_embed, e_t_embed
         del e_score, r_score, i_score, t_score, score, a_score
-        del hidden_all, adj, z
+        del hidden_all, adj, z, weight_norm
+        gc.collect()
 
         return output
 
@@ -269,4 +314,5 @@ class Weight_Sum_Loss(nn.Module):
         joint_loss = 0 
         for loss in [weight_norm[idx] * loss_list[idx] for idx in range(len(loss_list))]:
             joint_loss += loss
+        del loss_list, weight_norm
         return joint_loss

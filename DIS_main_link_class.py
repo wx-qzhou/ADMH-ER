@@ -11,6 +11,7 @@ import random
 
 def test():
     model.eval()
+    wdl0.eval()
     wdl1.eval()
     wdl2.eval()
     with torch.no_grad():
@@ -20,12 +21,15 @@ def test():
         loss = 0
 
         for data_index, data in enumerate(testing_generator):
+            relation_loss, link_loss, classify_loss = 0, 0, 0
             N, M, edge_label, ent_link, pos_neg_link, label, class_weight, entity_name_ids, pos_neg_triples_list, sparse_adj, case_name = \
                 process_loaded_data(data, device, batch_size=args.batch_size, batch_threads_num=args.batch_threads_num, neg_triples_num=args.neg_triples_num)
 
+            loss_list, loss_all = model.contrastive_Learning(ent_link, pos_neg_link, entity_name_ids, sparse_adj)
+            relation_loss += wdl0(loss_list)
             'Link'
             score_list = model.forward_link(ent_link, pos_neg_link, entity_name_ids, sparse_adj)
-            link_loss = wdl1([link_criterion(score, label) for score in score_list])
+            link_loss += wdl1([link_criterion(score, label) for score in score_list])
 
             hits_, mr_, mrr_, cost_ = greedy_alignment(score_list[-1].cpu(), args.top_k, args.test_threads_num)
             hits += hits_
@@ -35,7 +39,7 @@ def test():
 
             'Classify'
             output = model(entity_name_ids, N, sparse_adj)
-            classify_loss = F.nll_loss(output, edge_label.squeeze(), class_weight)
+            classify_loss += F.nll_loss(output, edge_label.squeeze(), class_weight)
 
             preds = output.max(1)[1].type_as(edge_label.squeeze()).cpu()
             edge_label = edge_label.cpu()
@@ -43,10 +47,11 @@ def test():
             prf_nums += torch.tensor([acc_val, recall_val, f1_val])
             total_nums += nums
 
-            loss_val = wdl2([link_loss, classify_loss])
+            loss_val = wdl2([link_loss, classify_loss, relation_loss, loss_all])
             loss += float(loss_val)
 
-            del edge_label, ent_link, pos_neg_link, label, class_weight, entity_name_ids
+            del edge_label, ent_link, pos_neg_link, label, class_weight, entity_name_ids, pos_neg_triples_list, sparse_adj
+            del score_list, output
 
         hits /= (data_index + 1)
         mr /= (data_index + 1)
@@ -72,11 +77,18 @@ def test():
             precision, recall, f1, cost))
         args.logger.info("Classify results: macro_precision: {:.4f}, macro_recall = {:.4f}, macro_f1 = {:.4f}, time = {:.3f} s".format(\
             macro_precision, macro_recall, macro_f1, cost))
-
-    return mrr if args.stop_metric == 'micro_f1' else hits[-1]
+    if args.stop_metric == 'micro_f1':
+        return f1
+    elif args.stop_metric == 'macro_f1':
+        return macro_f1
+    elif args.stop_metric == 'mrr':
+        return mrr
+    else: 
+        return hits[0] 
 
 def valid():
     model.eval()
+    wdl0.eval()
     wdl1.eval()
     wdl2.eval()
     with torch.no_grad():
@@ -86,12 +98,15 @@ def valid():
         loss = 0
 
         for data_index, data in enumerate(validing_generator):
+            relation_loss, link_loss, classify_loss = 0, 0, 0
             N, M, edge_label, ent_link, pos_neg_link, label, class_weight, entity_name_ids, pos_neg_triples_list, sparse_adj, case_name = \
                 process_loaded_data(data, device, batch_size=args.batch_size, batch_threads_num=args.batch_threads_num, neg_triples_num=args.neg_triples_num)
             
+            loss_list, loss_all = model.contrastive_Learning(ent_link, pos_neg_link, entity_name_ids, sparse_adj)
+            relation_loss += wdl0(loss_list)
             'Link'
             score_list = model.forward_link(ent_link, pos_neg_link, entity_name_ids, sparse_adj)
-            link_loss = wdl1([link_criterion(score, label) for score in score_list])
+            link_loss += wdl1([link_criterion(score, label) for score in score_list])
 
             hits_, mr_, mrr_, cost_ = greedy_alignment(score_list[-1].cpu(), args.top_k, args.test_threads_num)
             hits += hits_
@@ -101,7 +116,7 @@ def valid():
 
             'Classify'
             output = model(entity_name_ids, N, sparse_adj)
-            classify_loss = F.nll_loss(output, edge_label.squeeze(), class_weight)
+            classify_loss += F.nll_loss(output, edge_label.squeeze(), class_weight)
 
             preds = output.max(1)[1].type_as(edge_label.squeeze()).cpu()
             edge_label = edge_label.cpu()
@@ -109,10 +124,11 @@ def valid():
             prf_nums += torch.tensor([acc_val, recall_val, f1_val])
             total_nums += nums
 
-            loss_val = wdl2([link_loss, classify_loss])
+            loss_val = wdl2([link_loss, classify_loss, relation_loss, loss_all])
             loss += float(loss_val)
 
-            del edge_label, ent_link, pos_neg_link, label, class_weight, entity_name_ids
+            del edge_label, ent_link, pos_neg_link, label, class_weight, entity_name_ids, pos_neg_triples_list, sparse_adj
+            del score_list, output
 
         hits /= (data_index + 1)
         mr /= (data_index + 1)
@@ -145,7 +161,14 @@ def valid():
             precision, recall, f1, cost))
         args.logger.info("Classify results: macro_precision: {:.4f}, macro_recall = {:.4f}, macro_f1 = {:.4f}, time = {:.3f} s".format(\
             macro_precision, macro_recall, macro_f1, cost))
-    return mrr if args.stop_metric == 'micro_f1' else hits[0]
+    if args.stop_metric == 'micro_f1':
+        return f1
+    elif args.stop_metric == 'macro_f1':
+        return macro_f1
+    elif args.stop_metric == 'mrr':
+        return mrr
+    else: 
+        return hits[0] 
 
 def train():
     t = time.time()
@@ -166,36 +189,40 @@ def train():
             N, M, edge_label, ent_link, pos_neg_link, label, class_weight, entity_name_ids, pos_neg_triples_list, sparse_adj, case_name = \
                 process_loaded_data(data, device, entity_list=[i for i in range(kg.ent_num)], batch_size=args.batch_size, batch_threads_num=args.batch_threads_num, \
                 neg_triples_num=args.neg_triples_num, neighbor=kg.mutil_htop)
-            for pos_neg_triples in pos_neg_triples_list:
-                rel_p_h, rel_p_r, rel_p_t, rel_n_h, rel_n_r, rel_n_t = pos_neg_triples
-                relation_loss += model.forward_transe(rel_p_h, rel_p_r, rel_p_t, rel_n_h, rel_n_r, rel_n_t)
-            relation_loss /= len(pos_neg_triples_list)
+            # for pos_neg_triples in pos_neg_triples_list:
+            #     rel_p_h, rel_p_r, rel_p_t, rel_n_h, rel_n_r, rel_n_t = pos_neg_triples
+            #     relation_loss += model.forward_transe(rel_p_h, rel_p_r, rel_p_t, rel_n_h, rel_n_r, rel_n_t)
+            # relation_loss /= len(pos_neg_triples_list) 
+            # relation_loss = relation_loss * args.Lambda
+            loss_list, loss_all = model.contrastive_Learning(ent_link, pos_neg_link, entity_name_ids, sparse_adj)
+            relation_loss += wdl0(loss_list)
 
             'Link'
             score_list = model.forward_link(ent_link, pos_neg_link, entity_name_ids, sparse_adj)
-            # link_loss = F.nll_loss(score.view(-1), label.view(-1))
-            link_loss = wdl1([link_criterion(score, label) for score in score_list])
+            link_loss += wdl1([link_criterion(score, label) for score in score_list])
 
             'Classify'
             output = model(entity_name_ids, N, sparse_adj)
-            classify_loss = F.nll_loss(output, edge_label.squeeze(), class_weight)
+            classify_loss += F.nll_loss(output, edge_label.squeeze(), class_weight)
 
             'Final loss'
-            loss = wdl2([link_loss, classify_loss, relation_loss])
+            loss = wdl2([link_loss, classify_loss, relation_loss, loss_all])
 
             ''
-            epoch_rloss += relation_loss.item()
+            epoch_rloss += relation_loss.item() + loss_all.item()
             epoch_lloss += link_loss.item()  
             epoch_closs += classify_loss.item()
 
             'loss backward'
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)  # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(wdl0.parameters(), 2.0)  # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(wdl1.parameters(), 2.0)  # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(wdl2.parameters(), 2.0)  # 梯度裁剪
             optimizer.step()
-            del edge_label, ent_link, pos_neg_link, label, class_weight, entity_name_ids, pos_neg_triples_list
-
+            del edge_label, ent_link, pos_neg_link, label, class_weight, entity_name_ids, pos_neg_triples_list, sparse_adj
+            del score_list, output
+        
         scheduler1.step()   
 
         epoch_rloss /= (data_index + 1)
@@ -227,7 +254,7 @@ def train():
 
 if __name__ == "__main__":
     t = time.time()
-    args = read_args("config.json", True)
+    args = read_args("config_DBP15k.json", True)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
@@ -245,17 +272,19 @@ if __name__ == "__main__":
 
     model = MSDIS(kg, args)
     model.to(device)
+    wdl0 = Weight_Sum_Loss(5)
     wdl1 = Weight_Sum_Loss(6)
-    wdl2 = Weight_Sum_Loss(3)
+    wdl2 = Weight_Sum_Loss(4)
+    wdl0.to(device)
     wdl1.to(device)
     wdl2.to(device)
 
-    optimizer = torch.optim.AdamW([{'params': model.parameters()}, {'params': wdl1.parameters()}, {'params': wdl2.parameters()}], lr = args.learning_rate)
+    optimizer = torch.optim.AdamW([{'params': model.parameters()}, {'params': wdl0.parameters()}, {'params': wdl1.parameters()}, {'params': wdl2.parameters()}], lr = args.learning_rate)
     scheduler1 = ExponentialLR(optimizer, gamma=0.9)
     # scheduler2 = MultiStepLR(optimizer, milestones=[30,80], gamma=0.1)
     link_criterion = nn.MSELoss()
 
     train()
-    # model.load_state_dict(torch.load(out_folder + 'model_best.pkl'))
+    model.load_state_dict(torch.load(out_folder + 'model_best.pkl'))
     mrr = test()
     args.logger.info("Total run time = {:.3f} s.".format(time.time() - t))

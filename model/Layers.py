@@ -37,7 +37,8 @@ class SpecialSpmm(nn.Module):
 
 class MultiHeadGraphAttention(nn.Module):
     """
-    Sparse version GAT layer
+    Sparse version GAT layer, similar to https://arxiv.org/abs/1710.10903
+    https://github.com/Diego999/pyGAT/blob/master/layers.py
     """
 
     def __init__(self, n_head, f_in, f_out, attn_dropout, diag=True, init=None, bias=False):
@@ -107,7 +108,8 @@ class MultiHeadGraphAttention(nn.Module):
 
 class GraphConvolution(nn.Module):
     """
-    Simple GCN layer
+    Simple GCN layer, similar to https://arxiv.org/abs/1609.02907
+    https://github.com/tkipf/pygcn
     """
 
     def __init__(self, in_features, out_features, bias=True):
@@ -208,7 +210,6 @@ class GCN(nn.Module):
         del adj
         return x
 
-
 class ReLUSquared(nn.Module):
     "https://github.com/lucidrains/FLASH-pytorch/blob/main/flash_pytorch/flash_pytorch.py#L121"
     def forward(self, x):
@@ -232,9 +233,11 @@ class OffsetScale(nn.Module):
     def forward(self, x):
         # x : (N, dim)
         out = einsum('... d, h d -> ... h d', x, self.gamma) + self.beta # (N, 2, dim)
+        del x
         return out.unbind(dim=-2)
 
 class GAU(nn.Module):
+    "https://github.com/lucidrains/FLASH-pytorch/blob/main/flash_pytorch/flash_pytorch.py#L121"
     def __init__(self, dim, query_key_dim=200, expansion_factor=1, add_residual=True, dropout=0., laplace_attn_fn=False):
         super().__init__()
         self.dim = dim
@@ -280,11 +283,11 @@ class GAU(nn.Module):
         out = out * gate # (N, hidden_dim)
         out = self.to_out(out) # (N, dim)
 
-        del v, gate, qk, q, k, sim, attn
+        del v, gate, qk, q, k, sim, attn, mask
 
         if self.add_residual:
             out = out * x # (N, dim)
-
+        del x
         return out
 
 class GraphAttention(nn.Module):
@@ -318,13 +321,14 @@ class MultiModalFusion(nn.Module):
         return joint_emb
 
 class Multi_Modal_Aggregator(nn.Module):
-    def __init__(self, in_features, out_features, modal_num=3, bias=False):
+    "This is a class of multi-modal fusion."
+    def __init__(self, in_features, hidden_dim, out_features, modal_num=3, bias=False):
         super(Multi_Modal_Aggregator, self).__init__()
         self.in_features = in_features
-        self.gau = GAU(modal_num * in_features)
+        self.gau = GAU(modal_num * in_features + 2 * hidden_dim)
         self.weight_Q  = nn.Linear(in_features, in_features) # (2*M, 1)
-        self.weight_K  = nn.Linear(modal_num * in_features, in_features) # (2*M, 1)
-        self.weight_V  = nn.Linear(modal_num * in_features, in_features) # (2*M, 1)
+        self.weight_K  = nn.Linear(modal_num * in_features + 2 * hidden_dim, in_features) # (2*M, 1)
+        self.weight_V  = nn.Linear(modal_num * in_features + 2 * hidden_dim, in_features) # (2*M, 1)
         self.graphattention = GraphAttention()
         self.weight = nn.Linear(in_features, out_features)
         if bias:
@@ -334,24 +338,25 @@ class Multi_Modal_Aggregator(nn.Module):
 
     def forward(self, node, support):
         Q = self.weight_Q(node) # (N, 2 * dim)
-        support = self.gau(support, F.softmax(torch.matmul(support, support.T), dim=-1))
+        au = F.softmax(torch.matmul(support, support.T), dim=-1)
+        support = self.gau(support, au)
         K = self.weight_K(support)
         V = self.weight_V(support)
 
         B1 = K * self.graphattention(Q, F.softmax(torch.matmul(K, K.T), dim=-1)) * Q
         B2 = V * self.graphattention(Q, F.softmax(torch.matmul(V, V.T), dim=-1)) * Q
         gt = F.sigmoid(self.weight(B1)) # (N, 2 * dim)
-        Gs = F.softmax(torch.matmul((gt * K), ((1 - gt) * Q).T) / math.sqrt(self.in_features), dim=-1) # (N, N)
-        output = F.sigmoid(B1 * B1 * torch.matmul(Gs, B2))
-        output = F.normalize(output, p=2, dim=-1)
+        Gs = F.softmax(torch.matmul((gt * K), ((1 - gt) * Q).T) / math.sqrt(self.in_features), dim=-1) * au # (N, N)
+        output = F.normalize(B1 * B1 * torch.matmul(Gs, B2), p=2, dim=-1)
 
-        del Q, support, K, V, B1, B2, gt, Gs
+        del Q, support, K, V, B1, B2, gt, Gs, node, au
         if self.bias is not None:
             return output + self.bias
         else:
             return output
 
 class TransE(nn.Module):
+    "https://proceedings.neurips.cc/paper/2013/file/1cecc7a77928ca8133fa24680a88d2f9-Paper.pdf"
     def __init__(self, margin, norm=1, reduction='mean') -> None:
         super(TransE, self).__init__()
         self.margin = margin
@@ -396,26 +401,18 @@ class RGCN_Atten(nn.Module):
         return output
 
 class Classifier(nn.Module):
-    def __init__(self, n_input, hidden_1, hidden_2, dropout=0.5, n_classes=1):
+    "This is a classifier used to classify that the entities is disambiguated or not."
+    def __init__(self, n_input, hidden_1, hidden_2, dropout=0.0, n_classes=1, bias=False):
         super(Classifier, self).__init__()
         self.dropout = dropout
         self.n_classes = n_classes
 
-        self.fc1 = nn.Linear(n_input, hidden_1)
-        self.fc2 = nn.Linear(hidden_1, hidden_2)
-        self.fc3 = nn.Linear(hidden_2, n_classes)
-
-    # def forward(self, adj):
-    #     adj = self.fc1(adj)
-    #     # adj = F.normalize(adj, 2, -1)
-    #     frame = inspect.currentframe()
-    #     adj = F.relu(self.fc2(adj), inplace=True)
-    #     adj = self.fc3(adj)
-    #     adj = F.log_softmax(adj, dim=2).view(-1, self.n_classes)
-    #     del frame
-    #     return adj
+        self.fc1 = nn.Linear(n_input, hidden_1, bias=bias)
+        self.fc2 = nn.Linear(hidden_1, hidden_2, bias=bias)
+        self.fc3 = nn.Linear(hidden_2, n_classes, bias=bias)
 
     def forward(self, adj):
+        adj = F.normalize(adj, 2, -1)
         adj = F.relu(self.fc1(adj), inplace=True)
         adj = F.dropout(adj, self.dropout, training=self.training)
         frame = inspect.currentframe()
