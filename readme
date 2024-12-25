@@ -37,3 +37,11 @@ Our processing Datasets for MMER can be found below.
 The rough datasets can be available, and more details of them are coming. You can download them from:
 - [MMER Datasets on BaiduPan](Link: https://pan.baidu.com/s/1kbUPWreOKUcrwaBXNDjJFA?pwd=heb9 password: heb9)
 
+## Citation
+```bibtex
+@INPROCEEDINGS{9590332,
+  author={Zhou, Qian and Chen, Wei and Li, Zhang and An, Liu and Junhua, Fang and Zhao, Lei},
+  booktitle={TKDE}, 
+  title={ADMH-ER: Adaptive Denoising Multi-modal Hybrid for Entity Resolution}, 
+  year={2024}
+}
