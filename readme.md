@@ -39,9 +39,12 @@ The rough datasets can be available, and more details of them are coming. You ca
 
 ## Citation
 ```bibtex
-@INPROCEEDINGS{9590332,
-  author={Zhou, Qian and Chen, Wei and Li, Zhang and An, Liu and Junhua, Fang and Zhao, Lei},
-  booktitle={TKDE}, 
-  title={ADMH-ER: Adaptive Denoising Multi-modal Hybrid for Entity Resolution}, 
-  year={2024}
+@article{Zhou2025ADMHERAD,
+  title={ADMH-ER: Adaptive Denoising Multi-Modal Hybrid for Entity Resolution},
+  author={Qian Zhou and Wei Chen and Li Zhang and An Liu and Jun Fang and Lei Zhao},
+  journal={IEEE Transactions on Knowledge and Data Engineering},
+  year={2025},
+  volume={37},
+  pages={1049-1063},
+  url={https://api.semanticscholar.org/CorpusID:275448400}
 }
